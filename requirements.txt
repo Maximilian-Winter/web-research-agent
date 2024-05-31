@@ -1,8 +1,10 @@
 huggingface_hub>=0.22.2
 scikit-build-core
 https://github.com/abetlen/llama-cpp-python/releases/download/v0.2.76-cu124/llama_cpp_python-0.2.76-cp310-cp310-linux_x86_64.whl
-llama-cpp-agent>=0.2.20
+llama-cpp-agent>=0.2.23
 beautifulsoup4
 googlesearch-python
 duckduckgo_search
 trafilatura
+llama-index
+llama-index-readers-file

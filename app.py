@@ -1,5 +1,6 @@
 # Defaults
 import datetime
+import json
 
 import gradio as gr
 from huggingface_hub import hf_hub_download
@@ -21,8 +22,31 @@ from llama_cpp_agent.llm_output_settings import (
 from llama_cpp_agent.tools import WebSearchTool
 from llama_cpp_agent.prompt_templates import web_search_system_prompt, research_system_prompt
 
+js_script = """
+window.onload = function() {
+    function disableUI() {
+        document.querySelectorAll('input, button').forEach(function(item) {
+            item.disabled = true;
+        });
+    }
 
+    function enableUI() {
+        document.querySelectorAll('input, button').forEach(function(item) {
+            item.disabled = false;
+        });
+    }
 
+    var form = document.querySelector('form');
+    if (form) {
+        form.addEventListener('submit', function(event) {
+            event.preventDefault(); // Prevent form from submitting to observe the effect
+            disableUI();
+        });
+    }
+    
+    window.addEventListener('gradio_event_prediction_complete', enableUI);
+}
+"""
 
 
 def get_context_by_model(model_name):
@@ -47,6 +71,16 @@ def get_messages_formatter_type(model_name):
         return MessagesFormatterType.CHATML
 
 
+def ask_user(question: str):
+    """
+    Ask the user a question and return the answer.
+    Args:
+        question (str): The question to ask.
+    Returns:
+        (str): The answer.
+    """
+    return question
+
 
 def respond(
         message,
@@ -62,7 +96,7 @@ def respond(
     search_tool = WebSearchTool(
         llm_provider=provider,
         message_formatter_type=chat_template,
-        model_max_context_tokens=get_context_by_model("Mistral-7B-Instruct-v0.3-Q6_K.gguf"),
+        model_max_context_tokens=16384,
         max_tokens_search_results=12000,
         max_tokens_per_summary=2048,
     )
@@ -91,7 +125,7 @@ def respond(
     settings.repeat_penalty = repetition_penalty
 
     output_settings = LlmStructuredOutputSettings.from_functions(
-        [search_tool.get_tool()], add_thoughts_and_reasoning_field=True
+        [search_tool.get_tool(), ask_user], add_thoughts_and_reasoning_field=True
     )
 
     messages = BasicChatHistory()
@@ -102,15 +136,21 @@ def respond(
         messages.add_message(user)
         messages.add_message(assistant)
 
+    print(json.dumps(message, indent=2))
     result = web_search_agent.get_chat_response(
         f"Current Date and Time(d/m/y, h:m:s): {datetime.datetime.now().strftime('%d/%m/%Y, %H:%M:%S')}\n\nUser Query: " + message,
         llm_sampling_settings=settings,
         structured_output_settings=output_settings,
+        chat_history=messages,
         add_message_to_chat_history=False,
         add_response_to_chat_history=False,
         print_output=False,
+
     )
 
+    if result[0]["function"] == "ask_user":
+        yield result[0]["return_value"]
+        return ""
     outputs = ""
 
     settings.stream = True
@@ -195,6 +235,7 @@ main = gr.ChatInterface(
         color_accent_soft_dark="transparent"
     ),
     css=css,
+    multimodal=True,
     retry_btn="Retry",
     undo_btn="Undo",
     clear_btn="Clear",
