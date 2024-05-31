@@ -205,4 +205,4 @@ main = gr.ChatInterface(
 )
 
 if __name__ == "__main__":
-    main.launch()
+    main.launch(server_name="0.0.0.0", server_port=7860)
