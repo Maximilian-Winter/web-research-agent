@@ -2,15 +2,19 @@
 import datetime
 import json
 
+import PyPDF2
 import gradio as gr
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
+from pdf2image import convert_from_path
+from pydantic import BaseModel, Field
+from pytesseract import pytesseract
 
 from llama_cpp_agent.llm_prompt_template import PromptTemplate
 # Locals
 from llama_cpp_agent.providers import LlamaCppPythonProvider, LlamaCppServerProvider
 from content import css, PLACEHOLDER
-from llama_cpp_agent.tools.web_search.default_web_crawlers import ReadabilityWebCrawler
+from llama_cpp_agent.tools.web_search.tool import SummarizerTool, PdfSummarizerTool
 from utils import CitingSources
 # Agents
 from llama_cpp_agent import LlamaCppAgent
@@ -22,7 +26,10 @@ from llama_cpp_agent.llm_output_settings import (
 )
 # Tools
 from llama_cpp_agent.tools import WebSearchTool, GoogleWebSearchProvider
-from llama_cpp_agent.prompt_templates import web_search_system_prompt, research_system_prompt
+from llama_cpp_agent.prompt_templates import web_search_system_prompt, research_system_prompt, \
+    arxiv_search_system_prompt, general_information_assistant
+import os
+import requests
 
 js_script = """
 window.onload = function() {
@@ -49,6 +56,46 @@ window.onload = function() {
     window.addEventListener('gradio_event_prediction_complete', enableUI);
 }
 """
+
+
+class ArxivQuery(BaseModel):
+    """
+    A model representing search terms of an arxiv query.
+    """
+    search_terms: list[str] = Field(default_factory=list,
+                                    description="Think step by step and identify important search terms based on the user request.")
+
+
+def search_latest_arxiv_papers(query: str):
+    """
+    Searches the latest arxiv papers with a given query. Make sure to use a query effective for searching arxiv!
+    Args:
+        query (str): The query to search for
+    Returns:
+        (list): Returns a list of filenames of the downloaded arxiv papers
+    :return:
+    """
+    folder_name = "temp_arxiv"
+    url = f'http://export.arxiv.org/api/query?search_query=all:{query}&sortBy=relevance&sortOrder=descending&max_results={5}'
+    response = requests.get(url)
+    feed = response.content.decode('utf-8')
+    papers = []
+    for entry in feed.split('<entry>')[1:]:
+        if '</entry>' in entry:
+            id = entry.split('<id>')[1].split('<')[0].split('/')[-1]
+            title = entry.split('<title>')[1].split('<')[0]
+            papers.append((id, title))
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name)
+    filenames = []
+    for paper_id, paper_title in papers:
+        pdf_url = f'https://arxiv.org/pdf/{paper_id}.pdf'
+        pdf_filename = f'{folder_name}/{paper_id}.pdf'
+        filenames.append(pdf_filename)
+        with open(pdf_filename, 'wb') as f:
+            f.write(requests.get(pdf_url).content)
+        print(f'Downloaded {paper_title} ({paper_id})')
+    return filenames
 
 
 def get_context_by_model(model_name):
@@ -84,28 +131,47 @@ def ask_user(question: str):
     return question
 
 
+from PIL import Image
+from joblib import Parallel, delayed
+from pdf2image import convert_from_path
+import pytesseract
+
+# Preload pytesseract
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Update with your tesseract path
+
+
+def process_page(page):
+    # Convert the page to grayscale
+    page = page.convert('L')
+
+    # Apply OCR using the preloaded pytesseract
+    page_text = pytesseract.image_to_string(page)
+
+    return page_text
+
+
+def process_pdf(path):
+    pages = convert_from_path(path, dpi=300, fmt='PNG')
+    page_texts = Parallel(n_jobs=-1)(delayed(process_page)(page) for page in pages)
+    text = "\n".join(page_texts)
+    return text
+
+
 def respond(
         message,
         history: list[tuple[str, str]],
+        system_message,
         temperature,
         top_p,
         top_k,
         repetition_penalty,
 ):
     chat_template = get_messages_formatter_type("Mistral-7B-Instruct-v0.3-Q6_K.gguf")
-    provider = LlamaCppServerProvider("http://hades.hq.solidrust.net:8084")
-    search_tool = WebSearchTool(
-        llm_provider=provider,
-        message_formatter_type=chat_template,
-        model_max_context_tokens=32768,
-        max_tokens_search_results=12000,
-        max_tokens_per_summary=4069,
-        web_search_provider=GoogleWebSearchProvider(),
-    )
+    provider = LlamaCppServerProvider("http://localhost:8080")
 
     web_search_agent = LlamaCppAgent(
         provider,
-        system_prompt=PromptTemplate.from_string(web_search_system_prompt).generate_prompt({"USER_QUERY": message}),
+        system_prompt=PromptTemplate.from_string(arxiv_search_system_prompt).generate_prompt({"USER_QUERY": message}),
         predefined_messages_formatter_type=chat_template,
         debug_output=True,
     )
@@ -118,17 +184,16 @@ def respond(
     )
 
     settings = provider.get_provider_default_settings()
-    settings.stream = False
+    settings.stream = True
     settings.temperature = temperature
     settings.top_k = top_k
     settings.top_p = top_p
 
-    settings.max_tokens = 4069
-    settings.repeat_penalty = 1.0
-    settings.repeat_last_n = 2048
+    settings.max_tokens = 2048
+    settings.repeat_penalty = repetition_penalty
 
-    output_settings = LlmStructuredOutputSettings.from_functions(
-        [search_tool.get_tool()], add_thoughts_and_reasoning_field=True
+    output_settings = LlmStructuredOutputSettings.from_pydantic_models(
+        [ArxivQuery], LlmStructuredOutputType.object_instance
     )
 
     messages = BasicChatHistory()
@@ -139,64 +204,52 @@ def respond(
         messages.add_message(user)
         messages.add_message(assistant)
 
-    print(json.dumps(message, indent=2))
+    summarizer_tool = SummarizerTool(
+        llm_provider=provider,
+        message_formatter_type=chat_template,
+        model_max_context_tokens=32768,
+        max_tokens_summary_results=20000,
+        max_tokens_per_summary=4096
+    )
+
+    pdf_summarizer = PdfSummarizerTool(summarizer_tool)
+
     result = web_search_agent.get_chat_response(
         f"Current Date and Time(d/m/y, h:m:s): {datetime.datetime.now().strftime('%d/%m/%Y, %H:%M:%S')}",
         llm_sampling_settings=settings,
-        chat_history=messages,
         structured_output_settings=output_settings,
+        chat_history=messages,
         add_message_to_chat_history=False,
         add_response_to_chat_history=False,
-        print_output=False,
+        print_output=True,
 
     )
-    print(result)
-    if result[0]["function"] == "ask_user":
-        yield result[0]["return_value"]
-        return ""
-    outputs = ""
+    paths = search_latest_arxiv_papers(" ".join(result.search_terms))
+    pdf_texts = Parallel(n_jobs=-1)(delayed(process_pdf)(path) for path in paths)
 
-    settings.stream = True
-    response_text = answer_agent.get_chat_response(
-        result[0]["return_value"],
-        role=Roles.tool,
-        llm_sampling_settings=settings,
-        chat_history=messages,
-        returns_streaming_generator=True,
-        print_output=False,
-    )
+    print("Start Summarizing")
+    pdf_texts = pdf_summarizer.summarize_pdfs(message, pdf_texts)
 
-    for text in response_text:
-        outputs += text
-        yield outputs
+    for idx, path in enumerate(paths):
+        filename = os.path.basename(path)
+        pdf_texts[idx] = f"File: {filename}\n\n" + pdf_texts[idx]
 
-    output_settings = LlmStructuredOutputSettings.from_pydantic_models(
-        [CitingSources], LlmStructuredOutputType.object_instance
-    )
-
-    citing_sources = answer_agent.get_chat_response(
-        "Cite the sources you used in your response.",
-        role=Roles.tool,
-        llm_sampling_settings=settings,
-        chat_history=messages,
-        returns_streaming_generator=False,
-        structured_output_settings=output_settings,
-        print_output=False,
-    )
-    outputs += "\n\nSources:\n"
-    outputs += "\n".join(citing_sources.sources)
-    yield outputs
-
+    yield '\n\n'.join(pdf_texts)
 
 # Begin Gradio UI
 main = gr.ChatInterface(
     respond,
     additional_inputs=[
-       gr.Slider(minimum=0.1, maximum=1.0, value=0.35, step=0.1, label="Temperature"),
+        gr.Textbox(
+            value=research_system_prompt,
+            label="System message",
+            interactive=True,
+        ),
+        gr.Slider(minimum=0.1, maximum=1.0, value=0.35, step=0.1, label="Temperature"),
         gr.Slider(
             minimum=0.1,
             maximum=1.0,
-            value=0.95,
+            value=0.85,
             step=0.05,
             label="Top-p",
         ),
@@ -210,7 +263,7 @@ main = gr.ChatInterface(
         gr.Slider(
             minimum=0.0,
             maximum=2.0,
-            value=1.0,
+            value=1.1,
             step=0.1,
             label="Repetition penalty",
         ),
