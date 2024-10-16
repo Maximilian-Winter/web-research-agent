@@ -11,6 +11,7 @@ from llama_cpp_agent.llm_prompt_template import PromptTemplate
 from llama_cpp_agent.providers import LlamaCppPythonProvider, LlamaCppServerProvider
 from content import css, PLACEHOLDER
 from llama_cpp_agent.tools.web_search.default_web_crawlers import ReadabilityWebCrawler
+from llama_cpp_agent.tools.web_search.default_web_search_providers import HackernewsWebSearchProvider
 from utils import CitingSources
 # Agents
 from llama_cpp_agent import LlamaCppAgent
@@ -93,26 +94,19 @@ def respond(
         repetition_penalty,
 ):
     chat_template = get_messages_formatter_type("Mistral-7B-Instruct-v0.3-Q6_K.gguf")
-    provider = LlamaCppServerProvider("http://hades.hq.solidrust.net:8084")
+    provider = LlamaCppServerProvider("http://localhost:8080")
     search_tool = WebSearchTool(
         llm_provider=provider,
         message_formatter_type=chat_template,
         model_max_context_tokens=32768,
         max_tokens_search_results=12000,
         max_tokens_per_summary=4069,
-        web_search_provider=GoogleWebSearchProvider(),
+        web_search_provider=HackernewsWebSearchProvider(),
     )
 
     web_search_agent = LlamaCppAgent(
         provider,
         system_prompt=PromptTemplate.from_string(web_search_system_prompt).generate_prompt({"USER_QUERY": message}),
-        predefined_messages_formatter_type=chat_template,
-        debug_output=True,
-    )
-
-    answer_agent = LlamaCppAgent(
-        provider,
-        system_prompt=PromptTemplate.from_string(research_system_prompt).generate_prompt({"SUBJECT": message}),
         predefined_messages_formatter_type=chat_template,
         debug_output=True,
     )
@@ -139,7 +133,6 @@ def respond(
         messages.add_message(user)
         messages.add_message(assistant)
 
-    print(json.dumps(message, indent=2))
     result = web_search_agent.get_chat_response(
         f"Current Date and Time(d/m/y, h:m:s): {datetime.datetime.now().strftime('%d/%m/%Y, %H:%M:%S')}",
         llm_sampling_settings=settings,
@@ -147,52 +140,18 @@ def respond(
         structured_output_settings=output_settings,
         add_message_to_chat_history=False,
         add_response_to_chat_history=False,
-        print_output=False,
+        print_output=True,
+
 
     )
-    print(result)
-    if result[0]["function"] == "ask_user":
-        yield result[0]["return_value"]
-        return ""
-    outputs = ""
-
-    settings.stream = True
-    response_text = answer_agent.get_chat_response(
-        result[0]["return_value"],
-        role=Roles.tool,
-        llm_sampling_settings=settings,
-        chat_history=messages,
-        returns_streaming_generator=True,
-        print_output=False,
-    )
-
-    for text in response_text:
-        outputs += text
-        yield outputs
-
-    output_settings = LlmStructuredOutputSettings.from_pydantic_models(
-        [CitingSources], LlmStructuredOutputType.object_instance
-    )
-
-    citing_sources = answer_agent.get_chat_response(
-        "Cite the sources you used in your response.",
-        role=Roles.tool,
-        llm_sampling_settings=settings,
-        chat_history=messages,
-        returns_streaming_generator=False,
-        structured_output_settings=output_settings,
-        print_output=False,
-    )
-    outputs += "\n\nSources:\n"
-    outputs += "\n".join(citing_sources.sources)
-    yield outputs
+    yield result[0]["return_value"]
 
 
 # Begin Gradio UI
 main = gr.ChatInterface(
     respond,
     additional_inputs=[
-       gr.Slider(minimum=0.1, maximum=1.0, value=0.35, step=0.1, label="Temperature"),
+        gr.Slider(minimum=0.1, maximum=1.0, value=0.35, step=0.1, label="Temperature"),
         gr.Slider(
             minimum=0.1,
             maximum=1.0,

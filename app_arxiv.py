@@ -14,7 +14,8 @@ from llama_cpp_agent.llm_prompt_template import PromptTemplate
 # Locals
 from llama_cpp_agent.providers import LlamaCppPythonProvider, LlamaCppServerProvider
 from content import css, PLACEHOLDER
-from llama_cpp_agent.tools.web_search.tool import SummarizerTool, PdfSummarizerTool
+from llama_cpp_agent.tools import SummarizerTool
+from llama_cpp_agent.tools.summarizing.tool import TextType
 from utils import CitingSources
 # Agents
 from llama_cpp_agent import LlamaCppAgent
@@ -208,11 +209,8 @@ def respond(
         llm_provider=provider,
         message_formatter_type=chat_template,
         model_max_context_tokens=32768,
-        max_tokens_summary_results=20000,
         max_tokens_per_summary=4096
     )
-
-    pdf_summarizer = PdfSummarizerTool(summarizer_tool)
 
     result = web_search_agent.get_chat_response(
         f"Current Date and Time(d/m/y, h:m:s): {datetime.datetime.now().strftime('%d/%m/%Y, %H:%M:%S')}",
@@ -228,7 +226,7 @@ def respond(
     pdf_texts = Parallel(n_jobs=-1)(delayed(process_pdf)(path) for path in paths)
 
     print("Start Summarizing")
-    pdf_texts = pdf_summarizer.summarize_pdfs(message, pdf_texts)
+    pdf_texts = summarizer_tool.summarize_text(message, pdf_texts, text_type=TextType.ocr)
 
     for idx, path in enumerate(paths):
         filename = os.path.basename(path)

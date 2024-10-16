@@ -4,8 +4,9 @@ import shutil
 
 from llama_index.core.tools import ToolOutput
 from llama_cpp_agent.llm_output_settings import LlmStructuredOutputSettings
+from llama_cpp_agent.llm_prompt_template import PromptTemplate
 from rag_pipeline import ingest_docs_and_return_query_engine
-from agent import answer_agent
+from agent import answer_agent, search_pdf
 from llama_cpp_agent.chat_history import BasicChatHistory
 from llama_cpp_agent.chat_history.messages import Roles
 
@@ -51,9 +52,8 @@ def chat_response(message, chat_history=[]):
     structured_output_settings = LlmStructuredOutputSettings.from_llama_index_tools(
         [query_engine], add_thoughts_and_reasoning_field=True
     )
-    print(structured_output_settings.get_gbnf_grammar())
 
-    response = answer_agent.get_chat_response(message, chat_history=history,
+    response = answer_agent.get_chat_response(message, chat_history=history, system_prompt=PromptTemplate.from_string(search_pdf).generate_prompt({"user_query": message}),
                                               structured_output_settings=structured_output_settings)
     result_content = response[0]["return_value"].content if isinstance(response[0]["return_value"], ToolOutput) else response[0]["return_value"]
 

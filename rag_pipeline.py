@@ -29,10 +29,10 @@ def ingest_docs_and_return_query_engine(path: str):
     user_query_engine_tool = QueryEngineTool(
         query_engine=user_query_engine,
         metadata=ToolMetadata(
-            name="user_documents",
+            name="get_information_from_documents",
             description=(
-                "Provides information from the documents uploaded by the user. "
-                "Use a detailed plain text question as input to the tool."
+                "Provides information from the documents uploaded by the user."
+                "Use a detailed plain text question as input to the tool. It will retrieve the data by similarity search."
             ),
         ),
     )
